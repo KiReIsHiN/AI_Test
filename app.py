@@ -24,6 +24,20 @@ llm_client = OpenAI(api_key=openai_key)
 
 st.header("1. Управление GPU-сервером")
 
+# Настройки сервера вынесены в UI для обхода нехватки инстансов
+col1, col2 = st.columns(2)
+with col1:
+    selected_gpu = st.selectbox(
+        "Тип GPU:", 
+        ["NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090", "NVIDIA RTX A6000", "NVIDIA RTX A5000", "NVIDIA RTX A4000"]
+    )
+with col2:
+    selected_cloud = st.selectbox(
+        "Тип облака:", 
+        ["COMMUNITY", "SECURE"], 
+        help="COMMUNITY - дешевле и доступно больше серверов. SECURE - корпоративные дата-центры, но часто бывают заняты."
+    )
+
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
         # Обновленный скрипт:
@@ -76,8 +90,8 @@ if st.button("🚀 Создать сервер, установить окруж�
             pod = runpod.create_pod(
                 name="AiDubbing-GPU-Backend",
                 image_name="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404",
-                gpu_type_id="NVIDIA GeForce RTX 4090",
-                cloud_type="SECURE",
+                gpu_type_id=selected_gpu,
+                cloud_type=selected_cloud,
                 volume_in_gb=50,
                 container_disk_in_gb=20,
                 ports="5000/http",
