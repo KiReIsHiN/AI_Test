@@ -25,8 +25,26 @@ st.header("1. Управление GPU-сервером")
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
-        # Bash-скрипт передается одной строкой, убраны проблемные кавычки вокруг установки MOSS-TTS
-        startup_script = "bash -c 'cd /workspace && apt-get update && apt-get install -y ffmpeg && if [ ! -d /workspace/venv ]; then python3 -m venv /workspace/venv && /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson && /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e . && cd ..; fi && wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py && /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
+        # Bash-скрипт с подробным логированием каждого шага (set -x) и отключенной буферизацией Python
+        startup_script = (
+            "bash -c 'set -x; "
+            "echo \"=== СТАРТ ИНИЦИАЛИЗАЦИИ ===\"; "
+            "cd /workspace && apt-get update && apt-get install -y ffmpeg && "
+            "if [ ! -d /workspace/venv ]; then "
+            "echo \"=== СОЗДАНИЕ VENV И УСТАНОВКА ЗАВИСИМОСТЕЙ ===\"; "
+            "python3 -m venv /workspace/venv && "
+            "/workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson requests && "
+            "/workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && "
+            "git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e . && cd ..; "
+            "else "
+            "echo \"=== ОКРУЖЕНИЕ УЖЕ СУЩЕСТВУЕТ ===\"; "
+            "fi && "
+            "echo \"=== ЗАГРУЗКА БЕКЭНДА ===\"; "
+            "wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py && "
+            "echo \"=== ЗАПУСК UVICORN ===\"; "
+            "export PYTHONUNBUFFERED=1; "
+            "/workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
+        )
         
         try:
             pod = runpod.create_pod(
@@ -37,11 +55,13 @@ if st.button("🚀 Создать сервер, установить окруж�
                 volume_in_gb=50,
                 container_disk_in_gb=20,
                 ports="5000/http",
-                docker_args=startup_script
+                docker_args=startup_script,
+                # Добавляем переменную окружения для верности, чтобы логи Python выводились без задержек
+                env={"PYTHONUNBUFFERED": "1"} 
             )
             st.session_state['pod_id'] = pod['id']
             st.success(f"✅ Сервер создан! ID: {pod['id']}")
-            st.info("⚠️ ВНИМАНИЕ: Если это первый запуск, установка займет ~10-15 минут. Можете проверить прогресс в логах на сайте RunPod.")
+            st.info("⚠️ ВНИМАНИЕ: Зайдите в панель RunPod. Первые минуты смотрите в 'System Logs' (загрузка образа). Как только сервер запустится, процесс установки пакетов пойдет в 'Container Logs'.")
         except Exception as e:
             st.error(f"Ошибка при создании сервера: {e}")
 
