@@ -24,8 +24,8 @@ st.header("1. Управление GPU-сервером")
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
-        # Bash-скрипт передается одной строкой, чтобы избежать ошибки GraphQL парсера RunPod
-        startup_script = "bash -c 'cd /workspace && apt-get update && apt-get install -y ffmpeg && if [ ! -d /workspace/venv ]; then python3 -m venv /workspace/venv && /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson && /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e \".[torch-runtime]\" && cd ..; fi && wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py && /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
+        # Bash-скрипт передается одной строкой, убраны проблемные кавычки вокруг установки MOSS-TTS
+        startup_script = "bash -c 'cd /workspace && apt-get update && apt-get install -y ffmpeg && if [ ! -d /workspace/venv ]; then python3 -m venv /workspace/venv && /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson && /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e . && cd ..; fi && wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py && /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
         
         try:
             pod = runpod.create_pod(
