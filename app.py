@@ -25,7 +25,8 @@ st.header("1. Управление GPU-сервером")
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
-        # Bash-скрипт с подробным логированием каждого шага (set -x) и отключенной буферизацией Python
+        # Bash-скрипт с подробным логированием каждого шага (set -x) и отключенной буферизацией Python.
+        # Переменная окружения PYTHONUNBUFFERED=1 теперь передается только внутри bash-скрипта.
         startup_script = (
             "bash -c 'set -x; "
             "echo \"=== СТАРТ ИНИЦИАЛИЗАЦИИ ===\"; "
@@ -47,6 +48,8 @@ if st.button("🚀 Создать сервер, установить окруж�
         )
         
         try:
+            # Убран параметр env, так как он вызывал GraphQL Syntax Error: Expected Name, found "=" в RunPod API.
+            # Буферизация уже отключена внутри startup_script через export.
             pod = runpod.create_pod(
                 name="AiDubbing-GPU-Backend",
                 image_name="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404",
@@ -55,9 +58,7 @@ if st.button("🚀 Создать сервер, установить окруж�
                 volume_in_gb=50,
                 container_disk_in_gb=20,
                 ports="5000/http",
-                docker_args=startup_script,
-                # Добавляем переменную окружения для верности, чтобы логи Python выводились без задержек
-                env={"PYTHONUNBUFFERED": "1"} 
+                docker_args=startup_script
             )
             st.session_state['pod_id'] = pod['id']
             st.success(f"✅ Сервер создан! ID: {pod['id']}")
