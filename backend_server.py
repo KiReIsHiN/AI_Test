@@ -64,10 +64,20 @@ async def process_dubbing(request: Request):
             waveform = processor.decode_audio(audio_codes)
             
             synth_path = f"/workspace/synth_{start_ms}.wav"
-            torchaudio.save(synth_path, torch.tensor(waveform).cpu(), 48000)
+            
+            # Обеспечиваем правильную размерность тензора перед сохранением. 
+            # torchaudio.save ожидает 2D тензор размерности [channels, frames].
+            waveform_tensor = torch.tensor(waveform).cpu()
+            if waveform_tensor.dim() == 1:
+                waveform_tensor = waveform_tensor.unsqueeze(0)
+                
+            torchaudio.save(synth_path, waveform_tensor, 48000)
             
             synth_segment = AudioSegment.from_file(synth_path)
             dub_canvas = dub_canvas.overlay(synth_segment, position=start_ms)
+            
+            # Очистка кэша CUDA после каждой итерации для предотвращения утечек памяти (OOM) при длинных аудиофайлах
+            torch.cuda.empty_cache()
             
         final_comp = bg_audio.overlay(dub_canvas)
         out_file = "/workspace/final.aac"
