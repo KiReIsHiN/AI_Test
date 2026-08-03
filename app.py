@@ -27,25 +27,38 @@ if st.button("🚀 Создать сервер, установить окруж�
     with st.spinner("Запрос к RunPod..."):
         # Bash-скрипт с подробным логированием каждого шага (set -x) и отключенной буферизацией Python.
         # Переменная окружения PYTHONUNBUFFERED=1 теперь передается только внутри bash-скрипта.
-        startup_script = (
-            "bash -c 'set -x; "
-            "echo \"=== СТАРТ ИНИЦИАЛИЗАЦИИ ===\"; "
-            "cd /workspace && apt-get update && apt-get install -y ffmpeg && "
-            "if [ ! -d /workspace/venv ]; then "
-            "echo \"=== СОЗДАНИЕ VENV И УСТАНОВКА ЗАВИСИМОСТЕЙ ===\"; "
-            "python3 -m venv /workspace/venv && "
-            "/workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson requests && "
-            "/workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && "
-            "git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e . && cd ..; "
-            "else "
-            "echo \"=== ОКРУЖЕНИЕ УЖЕ СУЩЕСТВУЕТ ===\"; "
-            "fi && "
-            "echo \"=== ЗАГРУЗКА БЕКЭНДА ===\"; "
-            "wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py && "
-            "echo \"=== ЗАПУСК UVICORN ===\"; "
-            "export PYTHONUNBUFFERED=1; "
-            "/workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
-        )
+        
+        # ЧИСТЫЙ bash-скрипт без экранирования кавычек для передачи через Base64
+        raw_script = """
+        set -x
+        echo "=== СТАРТ ИНИЦИАЛИЗАЦИИ ==="
+        cd /workspace
+        apt-get update
+        apt-get install -y ffmpeg
+        if [ ! -d /workspace/venv ]; then
+            echo "=== СОЗДАНИЕ VENV И УСТАНОВКА ЗАВИСИМОСТЕЙ ==="
+            python3 -m venv /workspace/venv
+            /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson requests
+            /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+            git clone https://github.com/OpenMOSS/MOSS-TTS.git
+            cd MOSS-TTS
+            /workspace/venv/bin/pip install -e .
+            cd ..
+        else
+            echo "=== ОКРУЖЕНИЕ УЖЕ СУЩЕСТВУЕТ ==="
+        fi
+        echo "=== ЗАГРУЗКА БЕКЭНДА ==="
+        wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py
+        echo "=== ЗАПУСК UVICORN ==="
+        export PYTHONUNBUFFERED=1
+        /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000
+        """
+        
+        # Кодируем скрипт в Base64, чтобы обойти баг RunPod SDK с парсингом символов =, ", и пробелов
+        encoded_script = base64.b64encode(raw_script.encode('utf-8')).decode('utf-8')
+        
+        # Передаем декодер прямо в docker_args
+        startup_script = f"bash -c 'echo {encoded_script} | base64 -d | bash'"
         
         try:
             # Убран параметр env, так как он вызывал GraphQL Syntax Error: Expected Name, found "=" в RunPod API.
