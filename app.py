@@ -26,27 +26,45 @@ st.header("1. Управление GPU-сервером")
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
+        # Обновленный скрипт:
+        # 1. Запускает временный http-сервер на порту 5000 для трансляции логов.
+        # 2. Перенаправляет весь поток установки в install.log.
+        # 3. Исправляет ошибку с > в transformers через кавычки.
+        # 4. Убивает временный сервер и запускает FastAPI.
         raw_script = """
-        set -x
-        echo "=== СТАРТ ИНИЦИАЛИЗАЦИИ ==="
         cd /workspace
-        apt-get update
-        apt-get install -y ffmpeg
-        if [ ! -d /workspace/venv ]; then
-            echo "=== СОЗДАНИЕ VENV И УСТАНОВКА ЗАВИСИМОСТЕЙ ==="
-            python3 -m venv /workspace/venv
-            /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson requests
-            /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
-            git clone https://github.com/OpenMOSS/MOSS-TTS.git
-            cd MOSS-TTS
-            /workspace/venv/bin/pip install -e .
-            cd ..
-        else
-            echo "=== ОКРУЖЕНИЕ УЖЕ СУЩЕСТВУЕТ ==="
-        fi
-        echo "=== ЗАГРУЗКА БЕКЭНДА ==="
-        wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py
-        echo "=== ЗАПУСК UVICORN ==="
+        touch install.log
+        
+        # Запускаем временный сервер для отдачи логов в UI
+        python3 -m http.server 5000 &
+        HTTP_PID=$!
+        
+        # Весь вывод направляем в install.log
+        {
+            set -x
+            echo "=== СТАРТ ИНИЦИАЛИЗАЦИИ ==="
+            apt-get update
+            apt-get install -y ffmpeg
+            if [ ! -d /workspace/venv ]; then
+                echo "=== СОЗДАНИЕ VENV И УСТАНОВКА ЗАВИСИМОСТЕЙ ==="
+                python3 -m venv /workspace/venv
+                # Кавычки вокруг transformers обязательны для защиты от парсера Bash
+                /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 "transformers>=5.0.0" accelerate orjson requests
+                /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+                git clone https://github.com/OpenMOSS/MOSS-TTS.git
+                cd MOSS-TTS
+                /workspace/venv/bin/pip install -e .
+                cd ..
+            else
+                echo "=== ОКРУЖЕНИЕ УЖЕ СУЩЕСТВУЕТ ==="
+            fi
+            echo "=== ЗАГРУЗКА БЕКЭНДА ==="
+            wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py
+            echo "=== УСТАНОВКА ЗАВЕРШЕНА ==="
+        } >> install.log 2>&1
+        
+        # Освобождаем порт 5000 и запускаем основной бэкенд
+        kill $HTTP_PID
         export PYTHONUNBUFFERED=1
         /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000
         """
@@ -67,7 +85,7 @@ if st.button("🚀 Создать сервер, установить окруж�
             )
             st.session_state['pod_id'] = pod['id']
             st.success(f"✅ Сервер создан! ID: {pod['id']}")
-            st.info("⚠️ ВНИМАНИЕ: Зайдите в панель RunPod. Первые минуты смотрите в 'System Logs' (загрузка образа). Как только сервер запустится, процесс установки пакетов пойдет в 'Container Logs'.")
+            st.rerun()
         except Exception as e:
             st.error(f"Ошибка при создании сервера: {e}")
 
@@ -75,29 +93,45 @@ if st.button("🚀 Создать сервер, установить окруж�
 pod_id = st.text_input("ID запущенного Pod'а (подставится автоматически):", value=st.session_state.get('pod_id', ''))
 
 if pod_id:
-    # URL для связи с портом 5000 внутри вашего Pod'а через прокси RunPod
-    backend_url = f"https://{pod_id}-5000.proxy.runpod.net/dub"
+    backend_url = f"https://{pod_id}-5000.proxy.runpod.net"
+    dub_endpoint = f"{backend_url}/dub"
     
-    st.header("2. Загрузка и Дубляж")
-    audio_file = st.file_uploader("Загрузите исходный файл (.aac, .mp3)")
+    st.header("2. Статус установки сервера")
+    
+    # Блок мониторинга установки
+    if st.button("🔄 Обновить логи установки"):
+        # Добавляем параметр времени, чтобы избежать кэширования прокси-сервером RunPod
+        log_url = f"{backend_url}/install.log?t={int(time.time())}"
+        try:
+            res = requests.get(log_url, timeout=5)
+            if res.status_code == 200:
+                st.code(res.text, language="bash")
+                if "=== УСТАНОВКА ЗАВЕРШЕНА ===" in res.text:
+                    st.success("Пакеты установлены! Запускается FastAPI (модели загружаются в видеокарту, это займет еще ~30 секунд).")
+            else:
+                # Если 404, значит временный сервер убит и работает FastAPI (маршрут /install.log не существует). 
+                # Проверим доступность авто-документации FastAPI (/docs).
+                docs_res = requests.get(f"{backend_url}/docs", timeout=5)
+                if docs_res.status_code == 200:
+                    st.success("✅ Сервер FastAPI полностью запущен и готов к приему аудио!")
+                else:
+                    st.warning(f"Ожидание запуска. Код ответа сервера: {res.status_code}.")
+        except requests.exceptions.RequestException:
+             st.info("Контейнер скачивается или инициализируется на физической ноде. Подождите пару минут и нажмите кнопку снова.")
+    
+    st.header("3. Загрузка и Дубляж")
+    audio_file = st.file_uploader("Загрузите исходный файл (.aac, .mp3, .m4a, .wav)")
     
     if audio_file is not None:
         if st.button("Инициировать дубляж"):
             with st.status("Оркестрация процесса...", expanded=True):
                 st.write("1. Выполнение транскрипции (OpenAI Whisper)...")
                 
-                # Получаем оригинальное расширение файла
                 original_ext = os.path.splitext(audio_file.name)[1].lower()
-                
-                # Валидация расширения для обхода ограничений OpenAI API (ошибка 400 BadRequest).
-                # Если расширение не входит в список поддерживаемых (например, .aac),
-                # мы принудительно маскируем его под .m4a. Ffmpeg на серверах OpenAI
-                # корректно обработает кодек в любом случае.
                 valid_extensions = ['.flac', '.m4a', '.mp3', '.mp4', '.mpeg', '.mpga', '.oga', '.ogg', '.wav', '.webm']
                 safe_extension = original_ext if original_ext in valid_extensions else '.m4a'
                 safe_filename = f"audio{safe_extension}"
                 
-                # Транскрипция с точными таймкодами фраз
                 transcription_data = llm_client.audio.transcriptions.create(
                     model="whisper-1",
                     file=(safe_filename, audio_file.getvalue()),
@@ -130,7 +164,7 @@ if pod_id:
                 
                 try:
                     response = requests.post(
-                        backend_url,
+                        dub_endpoint,
                         json={"audio_base64": encoded_audio, "segments": payload_segments},
                         headers={"Authorization": f"Bearer {runpod_key}"},
                         timeout=600 
@@ -146,9 +180,9 @@ if pod_id:
                         else:
                             st.error(f"Ошибка GPU: {result_data.get('error')}")
                     else:
-                        st.error(f"Сервер недоступен (Код {response.status_code}). Возможно, установка пакетов еще не завершилась. Подождите пару минут.")
+                        st.error(f"Сервер недоступен (Код {response.status_code}). Убедитесь, что логи установки завершены.")
                 except requests.exceptions.Timeout:
-                    st.error("Превышено время ожидания ответа от сервера. Проверьте логи RunPod.")
+                    st.error("Превышено время ожидания ответа от сервера. Процесс генерации занимает много времени.")
 
     st.markdown("---")
     if st.button("🛑 Остановить и удалить сервер (Остановить списание средств)"):
