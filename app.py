@@ -26,9 +26,7 @@ if st.button("🚀 Создать сервер, установить окруж�
     with st.spinner("Запрос к RunPod..."):
         # Bash-скрипт, который выполнится на сервере RunPod при старте.
         # Он проверяет наличие окружения и ставит его только если папки venv нет.
-        startup_script = """bash -c '
-        cd /workspace &&
-        apt-get update && apt-get install -y ffmpeg &&
+        startup_script = "bash -c 'cd /workspace && apt-get update && apt-get install -y ffmpeg && if [ ! -d /workspace/venv ]; then python3 -m venv /workspace/venv && /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson && /workspace/venv/bin/pip install torch==2.9.1+cu128 torchaudio==2.9.1+cu128 --extra-index-url https://download.pytorch.org/whl/cu128 && git clone https://github.com/OpenMOSS/MOSS-TTS.git && cd MOSS-TTS && /workspace/venv/bin/pip install -e \".[torch-runtime]\" && cd ..; fi && wget -qO backend_server.py https://raw.githubusercontent.com/ВАШ_GITHUB/ВАШ_РЕПОЗИТОРИЙ/main/backend_server.py && /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000'"
         if [ ! -d "/workspace/venv" ]; then
             python3 -m venv /workspace/venv &&
             /workspace/venv/bin/pip install fastapi uvicorn pydub demucs==4.1.0 transformers>=5.0.0 accelerate orjson &&
