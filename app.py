@@ -3,6 +3,7 @@ import runpod
 import requests
 import time
 import base64
+import os
 from openai import OpenAI
 
 # Настройки страницы и инициализация
@@ -25,10 +26,6 @@ st.header("1. Управление GPU-сервером")
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
-        # Bash-скрипт с подробным логированием каждого шага (set -x) и отключенной буферизацией Python.
-        # Переменная окружения PYTHONUNBUFFERED=1 теперь передается только внутри bash-скрипта.
-        
-        # ЧИСТЫЙ bash-скрипт без экранирования кавычек для передачи через Base64
         raw_script = """
         set -x
         echo "=== СТАРТ ИНИЦИАЛИЗАЦИИ ==="
@@ -54,15 +51,10 @@ if st.button("🚀 Создать сервер, установить окруж�
         /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000
         """
         
-        # Кодируем скрипт в Base64, чтобы обойти баг RunPod SDK с парсингом символов =, ", и пробелов
         encoded_script = base64.b64encode(raw_script.encode('utf-8')).decode('utf-8')
-        
-        # Передаем декодер прямо в docker_args
         startup_script = f"bash -c 'echo {encoded_script} | base64 -d | bash'"
         
         try:
-            # Убран параметр env, так как он вызывал GraphQL Syntax Error: Expected Name, found "=" в RunPod API.
-            # Буферизация уже отключена внутри startup_script через export.
             pod = runpod.create_pod(
                 name="AiDubbing-GPU-Backend",
                 image_name="runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404",
@@ -94,10 +86,21 @@ if pod_id:
             with st.status("Оркестрация процесса...", expanded=True):
                 st.write("1. Выполнение транскрипции (OpenAI Whisper)...")
                 
+                # Получаем оригинальное расширение файла
+                original_ext = os.path.splitext(audio_file.name)[1].lower()
+                
+                # Валидация расширения для обхода ограничений OpenAI API (ошибка 400 BadRequest).
+                # Если расширение не входит в список поддерживаемых (например, .aac),
+                # мы принудительно маскируем его под .m4a. Ffmpeg на серверах OpenAI
+                # корректно обработает кодек в любом случае.
+                valid_extensions = ['.flac', '.m4a', '.mp3', '.mp4', '.mpeg', '.mpga', '.oga', '.ogg', '.wav', '.webm']
+                safe_extension = original_ext if original_ext in valid_extensions else '.m4a'
+                safe_filename = f"audio{safe_extension}"
+                
                 # Транскрипция с точными таймкодами фраз
                 transcription_data = llm_client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=("audio.aac", audio_file.getvalue()),
+                    file=(safe_filename, audio_file.getvalue()),
                     response_format="verbose_json",
                     timestamp_granularities=["segment"]
                 )
@@ -105,8 +108,6 @@ if pod_id:
                 st.write("2. Адаптивный перевод (с учетом тайминга)...")
                 payload_segments = []
                 
-                # В новой версии OpenAI SDK (v1.0+) объекты возвращаются как Pydantic модели, 
-                # поэтому доступ к свойствам осуществляется через точку (segment.start), а не как к словарю.
                 for segment in transcription_data.segments:
                     start_time = segment.start
                     end_time = segment.end
@@ -127,8 +128,6 @@ if pod_id:
                 st.write("3. Отправка на GPU-сервер. Ожидание генерации...")
                 encoded_audio = base64.b64encode(audio_file.getvalue()).decode('utf-8')
                 
-                # Отправка задачи на наш FastAPI сервер внутри RunPod. 
-                # Добавлен параметр timeout, чтобы запрос не завис навсегда, так как генерация аудио занимает время.
                 try:
                     response = requests.post(
                         backend_url,
