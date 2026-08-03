@@ -5,6 +5,7 @@ import time
 import base64
 from openai import OpenAI
 
+# Настройки страницы и инициализация
 st.set_page_config(page_title="AiDubbing V4", layout="centered")
 st.title("🎙️ AiDubbing V4: Управление и Дубляж")
 
@@ -69,9 +70,12 @@ if pod_id:
                 
                 st.write("2. Адаптивный перевод (с учетом тайминга)...")
                 payload_segments = []
+                
+                # В новой версии OpenAI SDK (v1.0+) объекты возвращаются как Pydantic модели, 
+                # поэтому доступ к свойствам осуществляется через точку (segment.start), а не как к словарю.
                 for segment in transcription_data.segments:
-                    start_time = segment["start"]
-                    end_time = segment["end"]
+                    start_time = segment.start
+                    end_time = segment.end
                     dur = end_time - start_time
                     if dur < 0.6: continue
                     
@@ -79,7 +83,7 @@ if pod_id:
                     prompt = f"Переведи на русский для дубляжа. ОГРАНИЧЕНИЕ: не более {max_chars} символов. Только текст."
                     resp = llm_client.chat.completions.create(
                         model="gpt-4o",
-                        messages=[{"role": "user", "content": f"{prompt}\nТекст: {segment['text']}"}],
+                        messages=[{"role": "user", "content": f"{prompt}\nТекст: {segment.text}"}],
                         temperature=0.25
                     )
                     translated = resp.choices[0].message.content.strip()
@@ -89,24 +93,29 @@ if pod_id:
                 st.write("3. Отправка на GPU-сервер. Ожидание генерации...")
                 encoded_audio = base64.b64encode(audio_file.getvalue()).decode('utf-8')
                 
-                # Отправка задачи на наш FastAPI сервер внутри RunPod
-                response = requests.post(
-                    backend_url,
-                    json={"audio_base64": encoded_audio, "segments": payload_segments},
-                    headers={"Authorization": f"Bearer {runpod_key}"}
-                )
-                
-                if response.status_code == 200:
-                    result_data = response.json()
-                    if result_data.get("status") == "success":
-                        final_audio_bytes = base64.b64decode(result_data["audio_base64"])
-                        st.success("Дубляж завершен!")
-                        st.audio(final_audio_bytes, format='audio/aac')
-                        st.download_button("Скачать результат", final_audio_bytes, "dubbed.aac", "audio/aac")
+                # Отправка задачи на наш FastAPI сервер внутри RunPod. 
+                # Добавлен параметр timeout, чтобы запрос не завис навсегда, так как генерация аудио занимает время.
+                try:
+                    response = requests.post(
+                        backend_url,
+                        json={"audio_base64": encoded_audio, "segments": payload_segments},
+                        headers={"Authorization": f"Bearer {runpod_key}"},
+                        timeout=600 
+                    )
+                    
+                    if response.status_code == 200:
+                        result_data = response.json()
+                        if result_data.get("status") == "success":
+                            final_audio_bytes = base64.b64decode(result_data["audio_base64"])
+                            st.success("Дубляж завершен!")
+                            st.audio(final_audio_bytes, format='audio/aac')
+                            st.download_button("Скачать результат", final_audio_bytes, "dubbed.aac", "audio/aac")
+                        else:
+                            st.error(f"Ошибка GPU: {result_data.get('error')}")
                     else:
-                        st.error(f"Ошибка GPU: {result_data.get('error')}")
-                else:
-                    st.error(f"Сервер недоступен (Код {response.status_code}). Возможно, установка пакетов еще не завершилась. Подождите пару минут.")
+                        st.error(f"Сервер недоступен (Код {response.status_code}). Возможно, установка пакетов еще не завершилась. Подождите пару минут.")
+                except requests.exceptions.Timeout:
+                    st.error("Превышено время ожидания ответа от сервера. Проверьте логи RunPod.")
 
     st.markdown("---")
     if st.button("🛑 Остановить и удалить сервер (Остановить списание средств)"):
