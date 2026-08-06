@@ -44,8 +44,7 @@ def convert_to_wav_bytes(raw_bytes: bytes) -> bytes:
 st.set_page_config(page_title="AiDubbing V4", layout="centered")
 st.title("🎙️ AiDubbing V4: Управление и Дубляж")
 
-API_PORT = 5000   # FastAPI: /dub, /docs
-LOG_PORT = 5001   # install.log — живёт весь срок жизни пода, никогда не убивается
+API_PORT = 5000   # единственный порт: /install.log, /health, /dub — всё на нём
 
 # --- Ключи и токены -----------------------------------------------------
 with st.expander("🔑 Настройки API ключей", expanded=True):
@@ -84,19 +83,24 @@ with col2:
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
-        # ИСПРАВЛЕНИЕ: раньше лог-сервер (порт 5000) убивался перед стартом
-        # uvicorn, а сам uvicorn запускался БЕЗ редиректа в install.log.
-        # Из-за этого на время загрузки весов модели (может быть много
-        # минут на холодном поде) install.log отдавал 404, а /docs ещё не
-        # был жив — то самое "Ожидание... 404" без конца.
-        # Теперь: лог-сервер на отдельном порту 5001 не убивается никогда,
-        # а вывод uvicorn (включая прогресс загрузки модели) тоже пишется
-        # в install.log.
+        # ИСПРАВЛЕНИЕ (после двух попыток): второй порт (5001) для логов не
+        # пробросился через прокси RunPod у вас на практике — не гадаю
+        # дальше, почему именно, а убираю саму необходимость в нём.
+        # Возвращаемся к ОДНОМУ порту 5000. Временный http.server отдаёт
+        # install.log только пока идёт pip install (это и раньше работало
+        # у вас нормально). Как только окружение готово, мы его убиваем и
+        # стартует uvicorn — но теперь backend_server.py грузит модель в
+        # фоновом потоке (см. CHANGES.md) и сам отвечает на /install.log
+        # (читая тот же файл) и /health ПОЧТИ СРАЗУ после старта, а не
+        # только после того как модель полностью загрузится в VRAM.
+        # Поэтому "слепого окна" между двумя серверами больше не должно
+        # быть, и второй порт не нужен.
         raw_script = f"""
         cd /workspace
         touch install.log
 
-        python3 -m http.server {LOG_PORT} --directory /workspace &
+        python3 -m http.server {API_PORT} --directory /workspace &
+        HTTP_PID=$!
 
         {{
             set -x
@@ -117,11 +121,13 @@ if st.button("🚀 Создать сервер, установить окруж�
             fi
             echo "=== ЗАГРУЗКА БЕКЭНДА ==="
             wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py
-            echo "=== PIP-ЗАВИСИМОСТИ ГОТОВЫ. ЗАПУСК FASTAPI (загрузка весов модели в VRAM, может занять несколько минут) ==="
-            export PYTHONUNBUFFERED=1
-            export DUB_AUTH_TOKEN='{dub_auth_token}'
-            /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port {API_PORT}
+            echo "=== PIP-ЗАВИСИМОСТИ ГОТОВЫ. ПЕРЕДАЧА ПОРТА {API_PORT} ОТ ВРЕМЕННОГО СЕРВЕРА К FASTAPI ==="
         }} >> install.log 2>&1
+
+        kill $HTTP_PID
+        export PYTHONUNBUFFERED=1
+        export DUB_AUTH_TOKEN='{dub_auth_token}'
+        /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port {API_PORT} >> install.log 2>&1
         """
 
         encoded_script = base64.b64encode(raw_script.encode('utf-8')).decode('utf-8')
@@ -135,12 +141,7 @@ if st.button("🚀 Создать сервер, установить окруж�
                 cloud_type=selected_cloud,
                 volume_in_gb=50,
                 container_disk_in_gb=20,
-                # ИСПРАВЛЕНИЕ: раньше открывался только один порт. Теперь
-                # два — под API и под логи. Если ваша версия runpod-python
-                # ждёт другой синтаксис для нескольких портов, сверьте с
-                # актуальной докой RunPod — этот вызов я не тестировал на
-                # реальном поде.
-                ports=f"{API_PORT}/http,{LOG_PORT}/http",
+                ports=f"{API_PORT}/http",
                 docker_args=startup_script
             )
             st.session_state['pod_id'] = pod['id']
@@ -155,7 +156,6 @@ pod_id = st.text_input("ID запущенного Pod'а (подставится
 
 if pod_id:
     backend_url = f"https://{pod_id}-{API_PORT}.proxy.runpod.net"
-    log_backend_url = f"https://{pod_id}-{LOG_PORT}.proxy.runpod.net"
     dub_endpoint = f"{backend_url}/dub"
 
     st.header("2. Статус установки сервера")
@@ -166,21 +166,33 @@ if pod_id:
 
     @st.fragment(run_every="3s" if watch else None)
     def log_console():
-        log_url = f"{log_backend_url}/install.log?t={int(time.time())}"
+        log_url = f"{backend_url}/install.log?t={int(time.time())}"
         try:
             res = requests.get(log_url, timeout=5)
             if res.status_code == 200:
                 text = res.text or "(лог пока пуст)"
                 st.code(text, language="bash", height=400)
-                if "Uvicorn running on" in text or "Application startup complete" in text:
-                    st.success("FastAPI поднялся — сервер готов принимать /dub.")
-                elif "=== PIP-ЗАВИСИМОСТИ ГОТОВЫ" in text:
-                    st.info("Пакеты установлены, идёт загрузка весов модели в VRAM — это может занять несколько минут.")
             else:
-                st.code(f"Лог-сервер ещё не отвечает (код {res.status_code}). Порт {LOG_PORT} мог не успеть проброситься проксёй RunPod.",
+                st.code(f"Сервер логов пока не отвечает (код {res.status_code}) — под ещё поднимается.",
                         language="bash", height=200)
+                return
         except requests.exceptions.RequestException:
             st.code("Контейнер ещё скачивается/инициализируется на физической ноде...", language="bash", height=200)
+            return
+
+        # Готовность проверяем отдельно через /health, а не текстом в
+        # логах — это то, что реально проверяет backend (model is not None),
+        # а не догадка по фразам в stdout.
+        try:
+            health = requests.get(f"{backend_url}/health", timeout=5).json()
+            if health.get("model_ready"):
+                st.success("Модель загружена — сервер готов принимать /dub.")
+            elif health.get("error"):
+                st.error(f"Загрузка модели упала с ошибкой: {health['error']}")
+            else:
+                st.info("FastAPI поднялся, модель ещё грузится в VRAM — обычно несколько минут.")
+        except requests.exceptions.RequestException:
+            st.info("FastAPI ещё не поднялся (либо ещё идёт pip install, либо порт переключается).")
 
     log_console()
 
@@ -256,6 +268,8 @@ if pod_id:
                             st.error(f"Ошибка GPU: {result_data.get('error')}")
                     elif response.status_code == 401:
                         st.error("401: секрет DUB_AUTH_TOKEN не совпадает с тем, что задан в поде (пересоздайте под).")
+                    elif response.status_code == 503:
+                        st.error(f"503: модель ещё не готова — {response.json().get('detail', '')}. Подождите и повторите.")
                     else:
                         st.error(f"Сервер недоступен (Код {response.status_code}). Убедитесь, что установка завершена.")
                 except requests.exceptions.Timeout:
