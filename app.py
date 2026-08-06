@@ -1,33 +1,32 @@
-import streamlit as st
-import runpod
-import requests
+import io
+import os
 import time
 import base64
-import os
 import secrets as pysecrets
+
+import runpod
+import requests
+import streamlit as st
 from openai import OpenAI
+from pydub import AudioSegment
 
 st.set_page_config(page_title="AiDubbing V4", layout="centered")
 st.title("🎙️ AiDubbing V4: Управление и Дубляж")
+
+API_PORT = 5000   # FastAPI: /dub, /docs
+LOG_PORT = 5001   # install.log — живёт весь срок жизни пода, никогда не убивается
 
 # --- Ключи и токены -----------------------------------------------------
 with st.expander("🔑 Настройки API ключей", expanded=True):
     openai_key = st.text_input("OpenAI API Key", type="password")
     runpod_key = st.text_input("RunPod API Key", type="password")
 
-    # ИСПРАВЛЕНИЕ (безопасность): backend_server.py раньше вообще не проверял
-    # Authorization на /dub, хотя app.py его отправлял. Значит, любой, кто
-    # узнал URL пода (https://{pod_id}-5000.proxy.runpod.net/dub), мог
-    # запускать дорогой GPU-инференс за ваш счёт без ключа.
-    # Здесь генерируем отдельный секрет (не сам RUNPOD_API_KEY), прокидываем
-    # его в под как переменную окружения при старте, и с этим же секретом
-    # подписываем запросы к /dub.
     if "dub_auth_token" not in st.session_state:
         st.session_state.dub_auth_token = pysecrets.token_urlsafe(24)
     dub_auth_token = st.text_input(
         "Секрет для авторизации /dub (генерируется автоматически)",
         key="dub_auth_token",
-        help="Этот же секрет будет передан в под как переменная окружения DUB_AUTH_TOKEN.",
+        help="Этот же секрет передаётся в под как переменная окружения DUB_AUTH_TOKEN.",
     )
 
 if not openai_key or not runpod_key:
@@ -54,12 +53,19 @@ with col2:
 
 if st.button("🚀 Создать сервер, установить окружение и запустить"):
     with st.spinner("Запрос к RunPod..."):
+        # ИСПРАВЛЕНИЕ: раньше лог-сервер (порт 5000) убивался перед стартом
+        # uvicorn, а сам uvicorn запускался БЕЗ редиректа в install.log.
+        # Из-за этого на время загрузки весов модели (может быть много
+        # минут на холодном поде) install.log отдавал 404, а /docs ещё не
+        # был жив — то самое "Ожидание... 404" без конца.
+        # Теперь: лог-сервер на отдельном порту 5001 не убивается никогда,
+        # а вывод uvicorn (включая прогресс загрузки модели) тоже пишется
+        # в install.log.
         raw_script = f"""
         cd /workspace
         touch install.log
 
-        python3 -m http.server 5000 &
-        HTTP_PID=$!
+        python3 -m http.server {LOG_PORT} --directory /workspace &
 
         {{
             set -x
@@ -80,13 +86,11 @@ if st.button("🚀 Создать сервер, установить окруж�
             fi
             echo "=== ЗАГРУЗКА БЕКЭНДА ==="
             wget -qO backend_server.py https://raw.githubusercontent.com/KiReIsHiN/AI_Test/main/backend_server.py
-            echo "=== УСТАНОВКА ЗАВЕРШЕНА ==="
+            echo "=== PIP-ЗАВИСИМОСТИ ГОТОВЫ. ЗАПУСК FASTAPI (загрузка весов модели в VRAM, может занять несколько минут) ==="
+            export PYTHONUNBUFFERED=1
+            export DUB_AUTH_TOKEN='{dub_auth_token}'
+            /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port {API_PORT}
         }} >> install.log 2>&1
-
-        kill $HTTP_PID
-        export PYTHONUNBUFFERED=1
-        export DUB_AUTH_TOKEN='{dub_auth_token}'
-        /workspace/venv/bin/python -m uvicorn backend_server:app --host 0.0.0.0 --port 5000
         """
 
         encoded_script = base64.b64encode(raw_script.encode('utf-8')).decode('utf-8')
@@ -100,7 +104,12 @@ if st.button("🚀 Создать сервер, установить окруж�
                 cloud_type=selected_cloud,
                 volume_in_gb=50,
                 container_disk_in_gb=20,
-                ports="5000/http",
+                # ИСПРАВЛЕНИЕ: раньше открывался только один порт. Теперь
+                # два — под API и под логи. Если ваша версия runpod-python
+                # ждёт другой синтаксис для нескольких портов, сверьте с
+                # актуальной докой RunPod — этот вызов я не тестировал на
+                # реальном поде.
+                ports=f"{API_PORT}/http,{LOG_PORT}/http",
                 docker_args=startup_script
             )
             st.session_state['pod_id'] = pod['id']
@@ -109,53 +118,38 @@ if st.button("🚀 Создать сервер, установить окруж�
         except Exception as e:
             st.error(f"Ошибка при создании сервера: {e}")
 
-# ИСПРАВЛЕНИЕ: раньше text_input получал одновременно value=... и не имел
-# key=, поэтому после первого ручного редактирования поля новый pod_id из
-# session_state переставал попадать в виджет при следующих rerun. Теперь
-# виджет сам является хранилищем session_state.pod_id.
 if "pod_id" not in st.session_state:
     st.session_state.pod_id = ""
 pod_id = st.text_input("ID запущенного Pod'а (подставится автоматически):", key="pod_id")
 
 if pod_id:
-    backend_url = f"https://{pod_id}-5000.proxy.runpod.net"
+    backend_url = f"https://{pod_id}-{API_PORT}.proxy.runpod.net"
+    log_backend_url = f"https://{pod_id}-{LOG_PORT}.proxy.runpod.net"
     dub_endpoint = f"{backend_url}/dub"
 
     st.header("2. Статус установки сервера")
 
-    # ИСПРАВЛЕНИЕ (UI): раньше логи показывались через st.code() без height,
-    # то есть блок разъезжался на весь текст и не был ни зафиксирован по
-    # высоте, ни независимо скроллируем — обновление логов требовало ручного
-    # нажатия кнопки. Теперь это st.fragment с run_every: часть страницы
-    # перерисовывается сама по таймеру, не трогая остальной интерфейс
-    # (https://docs.streamlit.io/develop/api-reference/execution-flow/st.fragment),
-    # а st.code(..., height=...) даёт фиксированную высоту и скролл внутри
-    # блока, как окно консоли (height добавлен в st.code в PR streamlit#10080).
     if "watch_logs" not in st.session_state:
         st.session_state.watch_logs = True
-
     watch = st.checkbox("Автообновление логов (каждые 3с)", key="watch_logs")
 
     @st.fragment(run_every="3s" if watch else None)
     def log_console():
-        log_url = f"{backend_url}/install.log?t={int(time.time())}"
+        log_url = f"{log_backend_url}/install.log?t={int(time.time())}"
         try:
             res = requests.get(log_url, timeout=5)
             if res.status_code == 200:
                 text = res.text or "(лог пока пуст)"
                 st.code(text, language="bash", height=400)
-                if "=== УСТАНОВКА ЗАВЕРШЕНА ===" in text:
-                    st.info("Пакеты установлены, FastAPI поднимается (модель грузится в VRAM, обычно ~30с).")
+                if "Uvicorn running on" in text or "Application startup complete" in text:
+                    st.success("FastAPI поднялся — сервер готов принимать /dub.")
+                elif "=== PIP-ЗАВИСИМОСТИ ГОТОВЫ" in text:
+                    st.info("Пакеты установлены, идёт загрузка весов модели в VRAM — это может занять несколько минут.")
             else:
-                docs_res = requests.get(f"{backend_url}/docs", timeout=5)
-                if docs_res.status_code == 200:
-                    st.code("✅ install.log больше не отдаётся — FastAPI поднялся, сервер готов принимать /dub.",
-                            language="bash", height=400)
-                    st.success("Сервер полностью готов к работе.")
-                else:
-                    st.code(f"Ожидание... код ответа install.log: {res.status_code}", language="bash", height=400)
+                st.code(f"Лог-сервер ещё не отвечает (код {res.status_code}). Порт {LOG_PORT} мог не успеть проброситься проксёй RunPod.",
+                        language="bash", height=200)
         except requests.exceptions.RequestException:
-            st.code("Контейнер ещё скачивается/инициализируется на физической ноде...", language="bash", height=400)
+            st.code("Контейнер ещё скачивается/инициализируется на физической ноде...", language="bash", height=200)
 
     log_console()
 
@@ -167,14 +161,27 @@ if pod_id:
             with st.status("Оркестрация процесса...", expanded=True):
                 st.write("1. Выполнение транскрипции (OpenAI Whisper)...")
 
-                original_ext = os.path.splitext(audio_file.name)[1].lower()
-                valid_extensions = ['.flac', '.m4a', '.mp3', '.mp4', '.mpeg', '.mpga', '.oga', '.ogg', '.wav', '.webm']
-                safe_extension = original_ext if original_ext in valid_extensions else '.m4a'
-                safe_filename = f"audio{safe_extension}"
+                # ИСПРАВЛЕНИЕ: OpenAI transcriptions API официально принимает
+                # только flac/mp3/mp4/mpeg/mpga/m4a/ogg/wav/webm — .aac туда
+                # НЕ входит. Раньше файл просто переименовывался в .m4a без
+                # перекодирования, из-за чего реальный AAC-поток не совпадал
+                # с ожидаемым M4A-контейнером -> 400 BadRequestError. Теперь
+                # файл всегда честно перекодируется в WAV через ffmpeg
+                # (pydub), независимо от исходного расширения.
+                raw_bytes = audio_file.getvalue()
+                try:
+                    audio_segment = AudioSegment.from_file(io.BytesIO(raw_bytes))
+                except Exception as e:
+                    st.error(f"Не удалось декодировать аудиофайл через ffmpeg: {e}")
+                    st.stop()
+
+                wav_buffer = io.BytesIO()
+                audio_segment.export(wav_buffer, format="wav")
+                wav_buffer.seek(0)
 
                 transcription_data = llm_client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=(safe_filename, audio_file.getvalue()),
+                    file=("audio.wav", wav_buffer, "audio/wav"),
                     response_format="verbose_json",
                     timestamp_granularities=["segment"]
                 )
@@ -201,16 +208,12 @@ if pod_id:
                     st.write(f"[{start_time:.1f}s - {end_time:.1f}s] {translated}")
 
                 st.write("3. Отправка на GPU-сервер. Ожидание генерации...")
-                encoded_audio = base64.b64encode(audio_file.getvalue()).decode('utf-8')
+                encoded_audio = base64.b64encode(raw_bytes).decode('utf-8')
 
                 try:
                     response = requests.post(
                         dub_endpoint,
                         json={"audio_base64": encoded_audio, "segments": payload_segments},
-                        # ИСПРАВЛЕНИЕ: раньше сюда шёл runpod_key (ключ доступа
-                        # ко всему аккаунту RunPod), хотя backend его всё
-                        # равно не проверял. Теперь это отдельный секрет,
-                        # который backend_server.py реально валидирует.
                         headers={"Authorization": f"Bearer {dub_auth_token}"},
                         timeout=600
                     )
@@ -225,9 +228,9 @@ if pod_id:
                         else:
                             st.error(f"Ошибка GPU: {result_data.get('error')}")
                     elif response.status_code == 401:
-                        st.error("401: секрет DUB_AUTH_TOKEN не совпадает с тем, что задан в поде (пересоздайте под или сверьте значение).")
+                        st.error("401: секрет DUB_AUTH_TOKEN не совпадает с тем, что задан в поде (пересоздайте под).")
                     else:
-                        st.error(f"Сервер недоступен (Код {response.status_code}). Убедитесь, что логи установки завершены.")
+                        st.error(f"Сервер недоступен (Код {response.status_code}). Убедитесь, что установка завершена.")
                 except requests.exceptions.Timeout:
                     st.error("Превышено время ожидания ответа от сервера. Процесс генерации занимает много времени.")
 
