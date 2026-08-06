@@ -1,10 +1,12 @@
 import os
 import base64
+import threading
 import subprocess
 import importlib.util
 import torch
 import torchaudio
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydub import AudioSegment
 from transformers import AutoModel, AutoProcessor
 from pathlib import Path
@@ -20,6 +22,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # https://github.com/OpenMOSS/MOSS-TTS/blob/main/docs/moss_tts_model_card.md
 MOSS_MODEL_ID = "OpenMOSS-Team/MOSS-TTS"
 TOKENS_PER_SECOND = 12.5  # задокументировано в model card: "1s ≈ 12.5 tokens"
+INSTALL_LOG_PATH = "/workspace/install.log"
 
 # Секрет для авторизации /dub. Задаётся app.py как env-переменная при
 # старте пода. Если не задан — эндпоинт открыт всем, кто узнает URL пода,
@@ -57,18 +60,62 @@ ATTN_IMPL = _resolve_attn_implementation(DEVICE, DTYPE)
 
 processor = None
 model = None
-try:
-    processor = AutoProcessor.from_pretrained(MOSS_MODEL_ID, trust_remote_code=True)
-    processor.audio_tokenizer = processor.audio_tokenizer.to(DEVICE)
-    model = AutoModel.from_pretrained(
-        MOSS_MODEL_ID,
-        trust_remote_code=True,
-        attn_implementation=ATTN_IMPL,
-        torch_dtype=DTYPE,
-    ).to(DEVICE)
-    model.eval()
-except Exception as e:
-    print(f"[ERROR] Не удалось загрузить MOSS-TTS: {e}")
+MODEL_LOAD_ERROR = None
+
+
+def _load_model_in_background():
+    """
+    ИСПРАВЛЕНИЕ: раньше загрузка модели шла прямо в теле модуля, то есть
+    ДО того, как uvicorn успевал забиндить порт и начать отвечать на
+    запросы. На это уходят минуты (скачивание + загрузка 8B весов в
+    VRAM), и всё это время порт 5000 ничем не обслуживался — снаружи это
+    выглядело как зависшая на 404 консоль логов.
+
+    Теперь загрузка идёт в фоновом потоке: uvicorn поднимается почти
+    сразу после pip install, /install.log и /health отвечают сразу же,
+    а /dub возвращает 503 "модель ещё грузится", пока model is None.
+    """
+    global processor, model, MODEL_LOAD_ERROR
+    try:
+        print("[INFO] Загрузка MOSS-TTS начата в фоновом потоке...")
+        proc = AutoProcessor.from_pretrained(MOSS_MODEL_ID, trust_remote_code=True)
+        proc.audio_tokenizer = proc.audio_tokenizer.to(DEVICE)
+        mdl = AutoModel.from_pretrained(
+            MOSS_MODEL_ID,
+            trust_remote_code=True,
+            attn_implementation=ATTN_IMPL,
+            torch_dtype=DTYPE,
+        ).to(DEVICE)
+        mdl.eval()
+        processor = proc
+        model = mdl
+        print("[INFO] MOSS-TTS загружена, /dub готов принимать запросы.")
+    except Exception as e:
+        MODEL_LOAD_ERROR = str(e)
+        print(f"[ERROR] Не удалось загрузить MOSS-TTS: {e}")
+
+
+threading.Thread(target=_load_model_in_background, daemon=True).start()
+
+
+@app.get("/health")
+async def health():
+    return {
+        "model_ready": model is not None and processor is not None,
+        "error": MODEL_LOAD_ERROR,
+    }
+
+
+@app.get("/install.log", response_class=PlainTextResponse)
+async def get_install_log():
+    # Тот же файл, в который шелл-скрипт пода пишет вывод apt/pip И вывод
+    # самого uvicorn (весь запуск обёрнут в `{ ... } >> install.log 2>&1`
+    # в app.py) — то есть этот эндпоинт продолжает без разрыва то, что до
+    # него отдавал временный python -m http.server на этапе pip install.
+    if not os.path.exists(INSTALL_LOG_PATH):
+        return "(install.log ещё не создан)"
+    with open(INSTALL_LOG_PATH, "r", errors="ignore") as f:
+        return f.read()
 
 
 def execute_vocal_isolation(input_path, output_dir):
@@ -89,7 +136,8 @@ async def process_dubbing(request: Request):
             raise HTTPException(status_code=401, detail="Invalid or missing Authorization header")
 
     if model is None or processor is None:
-        raise HTTPException(status_code=503, detail="Модель MOSS-TTS не загрузилась при старте — смотри логи пода.")
+        detail = MODEL_LOAD_ERROR or "Модель MOSS-TTS ещё грузится в VRAM, подождите и повторите запрос."
+        raise HTTPException(status_code=503, detail=detail)
 
     data = await request.json()
     audio_b64 = data.get("audio_base64")
