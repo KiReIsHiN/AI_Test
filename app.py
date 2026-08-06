@@ -2,13 +2,44 @@ import io
 import os
 import time
 import base64
+import tempfile
+import subprocess
 import secrets as pysecrets
 
 import runpod
 import requests
 import streamlit as st
 from openai import OpenAI
-from pydub import AudioSegment
+
+
+def convert_to_wav_bytes(raw_bytes: bytes) -> bytes:
+    """
+    Перекодирует произвольный аудиофайл в WAV через системный ffmpeg
+    (поставлен через packages.txt).
+
+    ИСПРАВЛЕНИЕ: раньше здесь стоял pydub.AudioSegment, но pydub на
+    Python 3.13+ падает при импорте, потому что тянет за собой модуль
+    audioop, а тот убрали из стандартной библиотеки Python (PEP 594);
+    fallback pydub на pyaudioop тоже не работает — пакета с таким именем
+    в PyPI нет (см. github.com/jiaaro/pydub issues #863, #815, открыты).
+    Streamlit Cloud сейчас на Python 3.14, поэтому уперлись сразу. Прямой
+    вызов ffmpeg такой проблемы не имеет и, по сути, делает то же самое.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        in_path = os.path.join(tmp, "input")
+        out_path = os.path.join(tmp, "output.wav")
+        with open(in_path, "wb") as f:
+            f.write(raw_bytes)
+
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", in_path, out_path],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg не смог перекодировать файл: {result.stderr.decode(errors='ignore')[-1000:]}")
+
+        with open(out_path, "rb") as f:
+            return f.read()
 
 st.set_page_config(page_title="AiDubbing V4", layout="centered")
 st.title("🎙️ AiDubbing V4: Управление и Дубляж")
@@ -166,22 +197,18 @@ if pod_id:
                 # НЕ входит. Раньше файл просто переименовывался в .m4a без
                 # перекодирования, из-за чего реальный AAC-поток не совпадал
                 # с ожидаемым M4A-контейнером -> 400 BadRequestError. Теперь
-                # файл всегда честно перекодируется в WAV через ffmpeg
-                # (pydub), независимо от исходного расширения.
+                # файл всегда честно перекодируется в WAV через прямой вызов
+                # ffmpeg (см. convert_to_wav_bytes выше — без pydub).
                 raw_bytes = audio_file.getvalue()
                 try:
-                    audio_segment = AudioSegment.from_file(io.BytesIO(raw_bytes))
+                    wav_bytes = convert_to_wav_bytes(raw_bytes)
                 except Exception as e:
                     st.error(f"Не удалось декодировать аудиофайл через ffmpeg: {e}")
                     st.stop()
 
-                wav_buffer = io.BytesIO()
-                audio_segment.export(wav_buffer, format="wav")
-                wav_buffer.seek(0)
-
                 transcription_data = llm_client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=("audio.wav", wav_buffer, "audio/wav"),
+                    file=("audio.wav", io.BytesIO(wav_bytes), "audio/wav"),
                     response_format="verbose_json",
                     timestamp_granularities=["segment"]
                 )
