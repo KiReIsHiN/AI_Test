@@ -105,6 +105,7 @@ if st.button("🚀 Создать сервер, установить окруж�
         {{
             set -x
             echo "=== СТАРТ ИНИЦИАЛИЗАЦИИ ==="
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y ffmpeg
             if [ ! -d /workspace/venv ]; then
@@ -276,8 +277,14 @@ if pod_id:
                     st.error("Превышено время ожидания ответа от сервера. Процесс генерации занимает много времени.")
 
     st.markdown("---")
-    if st.button("🛑 Остановить и удалить сервер (Остановить списание средств)"):
-        runpod.terminate_pod(pod_id)
-        st.session_state['pod_id'] = ''
-        st.success("Сервер уничтожен.")
-        st.rerun()
+
+    def _stop_pod():
+        # ИСПРАВЛЕНИЕ: раньше session_state['pod_id'] менялся ПОСЛЕ того,
+        # как в этом же прогоне уже был создан виджет text_input(key="pod_id")
+        # — Streamlit это запрещает и падает с StreamlitAPIException.
+        # Колбэк on_click выполняется ДО пересоздания виджетов на новом
+        # прогоне, так что здесь менять session_state безопасно.
+        runpod.terminate_pod(st.session_state.pod_id)
+        st.session_state.pod_id = ''
+
+    st.button("🛑 Остановить и удалить сервер (Остановить списание средств)", on_click=_stop_pod)
